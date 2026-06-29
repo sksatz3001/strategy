@@ -455,7 +455,21 @@ async def toggle_strategy(name: str, payload: StrategyToggleRequest) -> dict:
 @app.get("/dashboard/overview")
 async def dashboard_overview() -> dict:
     metrics = analytics.dashboard_metrics()
-    metrics["balance"] = round(float(runtime_state["equity"]), 2)
+    sim_equity = round(float(runtime_state["equity"]), 2)
+    live_equity = sim_equity
+    account_mode = "paper"
+
+    try:
+        account = await exchange.get_balance()
+        account_mode = str(account.get("mode", "paper"))
+        if account_mode == "live":
+            live_equity = round(float(account.get("equity", sim_equity)), 2)
+    except PermissionError:
+        account_mode = "unauthenticated"
+
+    metrics["balance"] = live_equity
+    metrics["sim_equity"] = sim_equity
+    metrics["account_mode"] = account_mode
     metrics["symbols"] = [
         {"symbol": symbol, "status": data.get("last_status", "idle")}
         for symbol, data in runtime_state["status_by_symbol"].items()
