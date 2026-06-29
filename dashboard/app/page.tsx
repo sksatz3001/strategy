@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import { EquityChart } from "@/components/EquityChart";
-import { StatusGrid } from "@/components/StatusGrid";
-import { TopMetrics } from "@/components/TopMetrics";
+import { EquityChart } from "../components/EquityChart";
+import { StatusGrid } from "../components/StatusGrid";
+import { TopMetrics } from "../components/TopMetrics";
 
 interface Overview {
   balance: number;
