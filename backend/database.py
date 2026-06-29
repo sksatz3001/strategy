@@ -76,7 +76,13 @@ if settings.database_url.startswith("sqlite"):
     Path("database").mkdir(parents=True, exist_ok=True)
 
 engine = create_engine(settings.database_url, future=True)
-SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, future=True)
+SessionLocal = sessionmaker(
+    bind=engine,
+    autocommit=False,
+    autoflush=False,
+    future=True,
+    expire_on_commit=False,
+)
 
 
 def init_db() -> None:
