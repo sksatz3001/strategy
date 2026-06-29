@@ -1,0 +1,25 @@
+FROM node:22-slim AS dashboard_builder
+WORKDIR /app/dashboard
+COPY dashboard/package.json dashboard/package-lock.json* ./
+RUN npm install
+COPY dashboard/ ./
+RUN npm run build
+
+FROM python:3.12-slim
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY backend/ ./backend/
+COPY database/ ./database/
+COPY --from=dashboard_builder /app/dashboard ./dashboard
+COPY docker/start-single.sh ./docker/start-single.sh
+
+RUN chmod +x ./docker/start-single.sh
+
+ENV APP_ENV=production
+EXPOSE 8000 3000
+CMD ["./docker/start-single.sh"]

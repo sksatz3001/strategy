@@ -1,0 +1,14 @@
+services:
+  strategy_single:
+    build:
+      context: .
+      dockerfile: Dockerfile.single
+    container_name: strategy-single
+    env_file:
+      - .env
+    environment:
+      - NEXT_PUBLIC_API_BASE=http://localhost:18100
+    ports:
+      - "18100:8000"
+      - "13100:3000"
+    restart: unless-stopped
