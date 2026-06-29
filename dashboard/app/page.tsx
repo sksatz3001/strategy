@@ -73,7 +73,27 @@ interface TradeRow {
   opened_at: string;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+const RAW_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+
+function resolveApiBase(): string {
+  if (typeof window === "undefined") {
+    return RAW_API_BASE;
+  }
+
+  try {
+    const configured = new URL(RAW_API_BASE);
+    const isLocalConfigured = configured.hostname === "localhost" || configured.hostname === "127.0.0.1";
+    if (!isLocalConfigured) {
+      return configured.origin;
+    }
+
+    const protocol = window.location.protocol === "https:" ? "https:" : "http:";
+    return `${protocol}//${window.location.hostname}:18100`;
+  } catch {
+    const protocol = window.location.protocol === "https:" ? "https:" : "http:";
+    return `${protocol}//${window.location.hostname}:18100`;
+  }
+}
 
 const defaultOverview: Overview = {
   balance: 0,
@@ -114,6 +134,7 @@ const defaultStats: StrategyStats = {
 };
 
 export default function Home() {
+  const apiBase = useMemo(() => resolveApiBase(), []);
   const [overview, setOverview] = useState<Overview>(defaultOverview);
   const [equity, setEquity] = useState<EquityPoint[]>([]);
   const [history, setHistory] = useState<TradeRow[]>([]);
@@ -125,24 +146,24 @@ export default function Home() {
 
     const fetchBootstrap = async () => {
       const [o, e, t] = await Promise.all([
-        fetch(`${API_BASE}/dashboard/overview`).then((res) => res.json()),
-        fetch(`${API_BASE}/dashboard/equity?limit=160`).then((res) => res.json()),
-        fetch(`${API_BASE}/dashboard/trades?limit=20`).then((res) => res.json()),
+        fetch(`${apiBase}/dashboard/overview`).then((res) => res.json()),
+        fetch(`${apiBase}/dashboard/equity?limit=160`).then((res) => res.json()),
+        fetch(`${apiBase}/dashboard/trades?limit=20`).then((res) => res.json()),
       ]);
       setOverview(o);
       setEquity(e);
       setHistory(t);
 
       const [stats, cal] = await Promise.all([
-        fetch(`${API_BASE}/dashboard/strategy-stats`).then((res) => res.json()),
-        fetch(`${API_BASE}/dashboard/calendar?days=45`).then((res) => res.json()),
+        fetch(`${apiBase}/dashboard/strategy-stats`).then((res) => res.json()),
+        fetch(`${apiBase}/dashboard/calendar?days=45`).then((res) => res.json()),
       ]);
       setStrategyStats(stats);
       setCalendar(cal);
     };
 
     const connectWs = () => {
-      const wsBase = API_BASE.replace("http", "ws");
+      const wsBase = apiBase.replace("http", "ws");
       ws = new WebSocket(`${wsBase}/ws/dashboard`);
       ws.onmessage = (event) => {
         const payload = JSON.parse(event.data);
@@ -161,9 +182,9 @@ export default function Home() {
 
     const timer = setInterval(async () => {
       const [trades, stats, cal] = await Promise.all([
-        fetch(`${API_BASE}/dashboard/trades?limit=20`).then((res) => res.json()),
-        fetch(`${API_BASE}/dashboard/strategy-stats`).then((res) => res.json()),
-        fetch(`${API_BASE}/dashboard/calendar?days=45`).then((res) => res.json()),
+        fetch(`${apiBase}/dashboard/trades?limit=20`).then((res) => res.json()),
+        fetch(`${apiBase}/dashboard/strategy-stats`).then((res) => res.json()),
+        fetch(`${apiBase}/dashboard/calendar?days=45`).then((res) => res.json()),
       ]);
       setHistory(trades);
       setStrategyStats(stats);
@@ -176,7 +197,7 @@ export default function Home() {
       }
       clearInterval(timer);
     };
-  }, []);
+  }, [apiBase]);
 
   const latestTrades = useMemo(() => history.slice(0, 10), [history]);
 
