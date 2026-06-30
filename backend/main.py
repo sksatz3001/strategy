@@ -382,26 +382,9 @@ async def _check_open_trade_exit(symbol: str, candle: dict[str, Any]) -> None:
         return
 
     trade_id = int(open_trade["trade_id"])
+    now_ts = datetime.now(UTC)
 
-    if trailed_out:
-        exit_price = close
-        reason = "trailed_out"
-    elif hit_sl:
-        exit_price = open_trade["stop_loss"]
-        reason = "sl_hit"
-    else:
-        exit_price = open_trade["take_profit"]
-        reason = "tp_hit"
-    sign = 1 if side == "buy" else -1
-    pnl = sign * (exit_price - open_trade["entry"]) * open_trade.get("risk_amount", 1.0)
-    pnl_r = risk_manager.compute_r_multiple(
-        side=side,
-        entry=open_trade["entry"],
-        stop=open_trade["stop_loss"],
-        exit_price=exit_price,
-    )
-
-    # Send actual close order to exchange
+    # Get exchange position quantity for close order
     close_side = "sell" if side == "buy" else "buy"
     quantity = float(open_trade.get("quantity", 0)) or 0.0
 
@@ -412,6 +395,21 @@ async def _check_open_trade_exit(symbol: str, candle: dict[str, Any]) -> None:
             if db_trade:
                 quantity = float(db_trade.quantity or 0)
 
+    # If still no quantity, try live exchange position
+    if quantity <= 0:
+        try:
+            live_positions = await exchange.get_open_positions()
+            normalized = symbol.replace("USDT", "USD")
+            for pos in live_positions:
+                ps = str(pos.get("symbol", "")).upper().replace("USDT", "USD")
+                if ps == normalized:
+                    quantity = float(pos.get("quantity", 0))
+                    break
+        except Exception:
+            pass
+
+    # Send close order to exchange FIRST
+    close_order_sent = False
     if quantity > 0:
         try:
             await orders.place({
@@ -422,12 +420,26 @@ async def _check_open_trade_exit(symbol: str, candle: dict[str, Any]) -> None:
                 "price": exit_price,
             })
             logger.info("Close order sent: %s %s qty=%s", symbol, close_side, quantity)
+            close_order_sent = True
         except Exception as exc:
             logger.error("Close order failed for %s: %s", symbol, exc)
     else:
         logger.warning("No quantity available for closing %s", symbol)
 
-    trade_id = int(open_trade["trade_id"])
+    # Only mark DB as closed if close was sent or this is a paper/strategy-only exit
+    if not close_order_sent and not exchange.is_paper():
+        logger.warning("Keeping %s in open_trades because close order was not sent", symbol)
+        return
+
+    sign = 1 if side == "buy" else -1
+    pnl = sign * (exit_price - open_trade["entry"]) * open_trade.get("risk_amount", 1.0)
+    pnl_r = risk_manager.compute_r_multiple(
+        side=side,
+        entry=open_trade["entry"],
+        stop=open_trade["stop_loss"],
+        exit_price=exit_price,
+    )
+
     with db_session() as session:
         trade = session.get(Trade, trade_id)
         if trade is None:
