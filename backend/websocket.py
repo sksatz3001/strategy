@@ -47,13 +47,35 @@ class CandleStream:
                 await self._task
 
     async def _run(self) -> None:
-        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
+        symbols = [
+            "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+            "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "ADAUSDT", "DOTUSDT",
+            "MATICUSDT", "LTCUSDT", "ATOMUSDT", "NEARUSDT", "APTUSDT",
+            "ARBUSDT", "OPUSDT", "INJUSDT", "SUIUSDT", "SEIUSDT",
+            "GOLDUSDT",
+        ]
         seed_price = {
             "BTCUSDT": 100000.0,
             "ETHUSDT": 3500.0,
             "SOLUSDT": 150.0,
             "BNBUSDT": 600.0,
             "XRPUSDT": 0.65,
+            "DOGEUSDT": 0.15,
+            "AVAXUSDT": 35.0,
+            "LINKUSDT": 18.0,
+            "ADAUSDT": 0.55,
+            "DOTUSDT": 7.5,
+            "MATICUSDT": 0.85,
+            "LTCUSDT": 85.0,
+            "ATOMUSDT": 9.5,
+            "NEARUSDT": 5.5,
+            "APTUSDT": 8.0,
+            "ARBUSDT": 1.2,
+            "OPUSDT": 2.5,
+            "INJUSDT": 28.0,
+            "SUIUSDT": 1.8,
+            "SEIUSDT": 0.45,
+            "GOLDUSDT": 2650.0,
         }
 
         while self._running:
