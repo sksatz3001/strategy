@@ -310,11 +310,30 @@ class EmaScalpStrategy:
         state.last_status = "unknown_trade"
         return None, asdict(state)
 
+    def _state_to_dict(self, state: EmaScalpState) -> dict:
+        return {
+            "symbol": state.symbol,
+            "ema9": round(state.ema9, 4),
+            "ema21": round(state.ema21, 4),
+            "ema200": round(state.ema200, 4),
+            "atr": round(state.atr, 4),
+            "avg_volume": round(state.avg_volume, 2),
+            "in_trade": state.in_trade,
+            "side": state.side,
+            "entry": state.entry,
+            "stop_loss": state.stop_loss,
+            "take_profit": state.take_profit,
+            "tp1_hit": state.tp1_hit,
+            "cooldown_until": state.cooldown_until.isoformat() if state.cooldown_until else None,
+            "last_status": state.last_status,
+            "candles_collected": len(state.candles),
+        }
+
     def status(self, symbol: str | None = None) -> dict:
         if symbol:
             state = self.states.get(symbol.upper())
-            return asdict(state) if state else {"symbol": symbol.upper(), "state": "idle"}
-        return {k: asdict(v) for k, v in self.states.items()}
+            return self._state_to_dict(state) if state else {"symbol": symbol.upper(), "state": "idle"}
+        return {k: self._state_to_dict(v) for k, v in self.states.items()}
 
 
 class StrategyRegistry:
