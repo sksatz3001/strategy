@@ -1,11 +1,11 @@
 from dataclasses import asdict
 
-from backend.strategy import RangeReentryStrategy
+from backend.strategy import EmaScalpStrategy
 
 
 class BacktestService:
     def run(self, candles: list[dict], *, rr: float, reentry_buffer_pct: float) -> dict:
-        strategy = RangeReentryStrategy(rr=rr, reentry_buffer_pct=reentry_buffer_pct)
+        strategy = EmaScalpStrategy(rr_tp2=rr)
         trades: list[dict] = []
 
         open_trade: dict | None = None
