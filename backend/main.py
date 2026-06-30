@@ -209,6 +209,7 @@ async def process_candle(candle: dict[str, Any]) -> None:
     )
 
     if not decision.approved:
+        strategy_engine.reset_trade(symbol)
         journal.log_event(
             "risk_blocked",
             {
@@ -226,6 +227,7 @@ async def process_candle(candle: dict[str, Any]) -> None:
         return
 
     if exchange.is_paper() is False and settings.live_trading_enabled is False:
+        strategy_engine.reset_trade(symbol)
         journal.log_event(
             "live_trade_blocked",
             {
@@ -245,23 +247,37 @@ async def process_candle(candle: dict[str, Any]) -> None:
         news = await llm.check_news_sentiment(symbol)
         sentiment = news.get("sentiment", "neutral")
         if signal.side == "buy" and sentiment == "bearish":
+            strategy_engine.reset_trade(symbol)
             journal.log_event("llm_blocked_entry", {"symbol": symbol, "side": "buy", "news": news}, level="WARN", symbol=symbol, strategy=signal.strategy)
             await telegram.send(f"🤖 LLM blocked BUY {symbol}: bearish news sentiment")
             return
         if signal.side == "sell" and sentiment == "bullish":
+            strategy_engine.reset_trade(symbol)
             journal.log_event("llm_blocked_entry", {"symbol": symbol, "side": "sell", "news": news}, level="WARN", symbol=symbol, strategy=signal.strategy)
             await telegram.send(f"🤖 LLM blocked SELL {symbol}: bullish news sentiment")
             return
 
-    await orders.place(
-        {
-            "symbol": signal.symbol,
-            "side": signal.side,
-            "quantity": decision.quantity,
-            "order_type": "market",
-            "price": signal.entry,
-        }
-    )
+    try:
+        await orders.place(
+            {
+                "symbol": signal.symbol,
+                "side": signal.side,
+                "quantity": decision.quantity,
+                "order_type": "market",
+                "price": signal.entry,
+            }
+        )
+    except Exception as exc:
+        strategy_engine.reset_trade(symbol)
+        journal.log_event(
+            "order_failed",
+            {"symbol": symbol, "error": str(exc), "strategy": signal.strategy},
+            level="ERROR",
+            symbol=symbol,
+            strategy=signal.strategy,
+        )
+        await telegram.send(f"❌ Order failed {symbol}: {exc}")
+        return
 
     with db_session() as session:
         trade = Trade(

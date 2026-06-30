@@ -310,6 +310,18 @@ class EmaScalpStrategy:
         state.last_status = "unknown_trade"
         return None, asdict(state)
 
+    def reset_trade(self, symbol: str) -> None:
+        """Reset strategy trade state when order was blocked/failed."""
+        state = self.states.get(symbol.upper())
+        if state:
+            state.in_trade = False
+            state.side = ""
+            state.entry = 0.0
+            state.stop_loss = 0.0
+            state.take_profit = 0.0
+            state.tp1_hit = False
+            state.last_status = "trade_blocked"
+
     def _state_to_dict(self, state: EmaScalpState) -> dict:
         return {
             "symbol": state.symbol,
@@ -406,6 +418,9 @@ class StrategyEngine:
         if not self.registry.is_enabled(self.ema_scalp.name):
             return None, {"state": "disabled"}
         return self.ema_scalp.on_candle(candle)
+
+    def reset_trade(self, symbol: str) -> None:
+        self.ema_scalp.reset_trade(symbol)
 
     def status(self, symbol: str | None = None) -> dict:
         return {
