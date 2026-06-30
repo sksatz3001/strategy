@@ -317,6 +317,7 @@ async def process_candle(candle: dict[str, Any]) -> None:
             "stop_loss": trade.stop_loss,
             "take_profit": trade.take_profit,
             "risk_amount": trade.risk_amount,
+            "quantity": trade.quantity,
         }
 
     day_key = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -397,6 +398,21 @@ async def _check_open_trade_exit(symbol: str, candle: dict[str, Any]) -> None:
         stop=open_trade["stop_loss"],
         exit_price=exit_price,
     )
+
+    # Send actual close order to exchange
+    close_side = "sell" if side == "buy" else "buy"
+    quantity = float(open_trade.get("quantity", 0))
+    try:
+        await orders.place({
+            "symbol": symbol,
+            "side": close_side,
+            "quantity": quantity,
+            "order_type": "market",
+            "price": exit_price,
+        })
+        logger.info("Close order sent: %s %s qty=%s", symbol, close_side, quantity)
+    except Exception as exc:
+        logger.error("Close order failed for %s: %s", symbol, exc)
 
     trade_id = int(open_trade["trade_id"])
     with db_session() as session:
