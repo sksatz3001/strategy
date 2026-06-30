@@ -22,6 +22,8 @@ interface Overview {
   current_streak: number;
   best_streak: number;
   worst_streak: number;
+  account_mode?: string;
+  sim_equity?: number;
   symbols: Array<{ symbol: string; status: string }>;
   open_positions: Array<{
     id: number;
@@ -61,6 +63,38 @@ interface EquityPoint {
   trade_id: number;
   ts: string;
   equity: number;
+}
+
+interface SymbolStat {
+  symbol: string;
+  status: string;
+  total_trades: number;
+  open_trades: number;
+  closed_trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  total_pnl: number;
+  total_profit: number;
+  total_loss: number;
+  avg_pnl: number;
+  lots_traded: number;
+}
+
+interface DayStats {
+  trades: Record<string, number>;
+  loss: Record<string, number>;
+  profit: Record<string, number>;
+  profit_target: number;
+  loss_limit_pct: number;
+}
+
+const defaultDayStats: DayStats = {
+  trades: {},
+  loss: {},
+  profit: {},
+  profit_target: 20,
+  loss_limit_pct: 3,
 }
 
 interface TradeRow {
@@ -111,6 +145,8 @@ const defaultOverview: Overview = {
   current_streak: 0,
   best_streak: 0,
   worst_streak: 0,
+  account_mode: "paper",
+  sim_equity: 0,
   symbols: [],
   open_positions: [],
 };
@@ -140,6 +176,8 @@ export default function Home() {
   const [history, setHistory] = useState<TradeRow[]>([]);
   const [strategyStats, setStrategyStats] = useState<StrategyStats>(defaultStats);
   const [calendar, setCalendar] = useState<CalendarDay[]>([]);
+  const [symbolStats, setSymbolStats] = useState<SymbolStat[]>([]);
+  const [dayStats, setDayStats] = useState<DayStats>(defaultDayStats);
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -160,6 +198,9 @@ export default function Home() {
       ]);
       setStrategyStats(stats);
       setCalendar(cal);
+
+      const sym = await fetch(`${apiBase}/dashboard/symbol-stats`).then((res) => res.json());
+      setSymbolStats(sym);
     };
 
     const connectWs = () => {
@@ -167,8 +208,11 @@ export default function Home() {
       ws = new WebSocket(`${wsBase}/ws/dashboard`);
       ws.onmessage = (event) => {
         const payload = JSON.parse(event.data);
-        setOverview(payload.overview);
-        setEquity(payload.equity);
+        if (payload.overview) setOverview(payload.overview);
+        if (payload.equity) setEquity(payload.equity);
+        if (payload.trades) setHistory(payload.trades);
+        if (payload.symbol_stats) setSymbolStats(payload.symbol_stats);
+        if (payload.day_stats) setDayStats(payload.day_stats);
       };
       ws.onclose = () => {
         setTimeout(connectWs, 1200);
@@ -181,14 +225,16 @@ export default function Home() {
     connectWs();
 
     const timer = setInterval(async () => {
-      const [trades, stats, cal] = await Promise.all([
+      const [trades, stats, cal, sym] = await Promise.all([
         fetch(`${apiBase}/dashboard/trades?limit=20`).then((res) => res.json()),
         fetch(`${apiBase}/dashboard/strategy-stats`).then((res) => res.json()),
         fetch(`${apiBase}/dashboard/calendar?days=45`).then((res) => res.json()),
+        fetch(`${apiBase}/dashboard/symbol-stats`).then((res) => res.json()),
       ]);
       setHistory(trades);
       setStrategyStats(stats);
       setCalendar(cal);
+      setSymbolStats(sym);
     }, 3000);
 
     return () => {
@@ -212,6 +258,79 @@ export default function Home() {
       </header>
 
       <TopMetrics {...overview} />
+
+      <section className="panel">
+        <div className="panel-title">Daily Target Progress</div>
+        {(() => {
+          const today = new Date().toISOString().split("T")[0];
+          const todayProfit = dayStats.profit?.[today] ?? 0;
+          const todayLoss = dayStats.loss?.[today] ?? 0;
+          const netProfit = todayProfit - todayLoss;
+          const target = dayStats.profit_target ?? 20;
+          const pct = Math.min(100, Math.max(0, (netProfit / target) * 100));
+          const todayTrades = dayStats.trades?.[today] ?? 0;
+          return (
+            <div className="target-progress">
+              <div className="target-info">
+                <span>Net Today: <strong className={netProfit >= 0 ? "pos" : "neg"}>${netProfit.toFixed(2)}</strong></span>
+                <span>Target: <strong>${target.toFixed(2)}</strong></span>
+                <span>Trades Today: <strong>{todayTrades}</strong></span>
+                <span>Mode: <strong>{overview.account_mode ?? "unknown"}</strong></span>
+              </div>
+              <div className="progress-bar-bg">
+                <div className="progress-bar-fill" style={{ width: `${pct}%` }} />
+              </div>
+              <div className="target-pct">{pct.toFixed(1)}% of daily target</div>
+            </div>
+          );
+        })()}
+      </section>
+
+      <section className="panel">
+        <div className="panel-title">Per-Symbol Breakdown</div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Status</th>
+                <th>Total Trades</th>
+                <th>Open</th>
+                <th>Wins</th>
+                <th>Losses</th>
+                <th>Win %</th>
+                <th>Total P/L</th>
+                <th>Profit</th>
+                <th>Loss</th>
+                <th>Avg P/L</th>
+                <th>Lots</th>
+              </tr>
+            </thead>
+            <tbody>
+              {symbolStats.length === 0 ? (
+                <tr><td colSpan={12}>No trades yet</td></tr>
+              ) : (
+                symbolStats.map((s) => (
+                  <tr key={s.symbol}>
+                    <td className="sym-name">{s.symbol}</td>
+                    <td className="sym-status">{s.status.replaceAll("_", " ")}</td>
+                    <td>{s.total_trades}</td>
+                    <td>{s.open_trades}</td>
+                    <td className="pos">{s.wins}</td>
+                    <td className="neg">{s.losses}</td>
+                    <td>{s.win_rate}%</td>
+                    <td className={s.total_pnl >= 0 ? "pos" : "neg"}>{s.total_pnl}</td>
+                    <td className="pos">{s.total_profit}</td>
+                    <td className="neg">{s.total_loss}</td>
+                    <td className={s.avg_pnl >= 0 ? "pos" : "neg"}>{s.avg_pnl}</td>
+                    <td>{s.lots_traded}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
 
       <section className="layout-grid">
         <StatusGrid rows={overview.symbols} />

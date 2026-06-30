@@ -6,6 +6,7 @@ from datetime import datetime
 class RiskConfig:
     risk_per_trade_pct: float = 1.0
     daily_loss_limit_pct: float = 3.0
+    daily_profit_target: float = 20.0
     max_trades_per_day: int = 6
     max_leverage: int = 5
 
@@ -16,6 +17,8 @@ class RiskDecision:
     reason: str
     quantity: float = 0.0
     risk_amount: float = 0.0
+    notional: float = 0.0
+    margin_required: float = 0.0
 
 
 class RiskManager:
@@ -48,6 +51,10 @@ class RiskManager:
         if daily_loss >= daily_loss_limit:
             return RiskDecision(False, "Daily loss limit reached")
 
+        daily_profit = float(day_stats.get("profit", {}).get(current_day, 0.0))
+        if daily_profit >= self.config.daily_profit_target:
+            return RiskDecision(False, f"Daily profit target reached (${daily_profit:.2f})")
+
         per_unit_risk = abs(entry_price - stop_price)
         if per_unit_risk <= 0:
             return RiskDecision(False, "Invalid risk distance (entry equals stop)")
@@ -65,6 +72,8 @@ class RiskManager:
             reason="ok",
             quantity=round(quantity, 6),
             risk_amount=round(risk_amount, 2),
+            notional=round(notional, 2),
+            margin_required=round(margin_required, 2),
         )
 
     def compute_r_multiple(self, *, side: str, entry: float, stop: float, exit_price: float) -> float:

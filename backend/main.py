@@ -14,6 +14,7 @@ from backend.config import settings
 from backend.database import CandleRecord, Trade, db_session, init_db
 from backend.exchange import ExchangeService
 from backend.journal import JournalService
+from backend.llm import LLMDecisionService
 from backend.orders import OrderService
 from backend.risk import RiskConfig, RiskManager
 from backend.scheduler import SchedulerService
@@ -32,11 +33,25 @@ exchange = ExchangeService()
 candles = CandleStream()
 orders = OrderService(exchange)
 scheduler = SchedulerService()
-strategy_engine = StrategyEngine(rr=settings.default_rr, reentry_buffer_pct=settings.reentry_buffer_pct)
+strategy_engine = StrategyEngine(
+    ema_fast=settings.ema_fast,
+    ema_slow=settings.ema_slow,
+    ema_trend=settings.ema_trend,
+    atr_period=settings.atr_period,
+    volume_period=settings.volume_period,
+    ema_slope_lookback=settings.ema_slope_lookback,
+    atr_stop_mult=settings.atr_stop_mult,
+    rr_tp1=settings.rr_tp1,
+    rr_tp2=settings.rr_tp2,
+    min_atr_pct=settings.min_atr_pct,
+    max_distance_atr_mult=settings.max_distance_atr_mult,
+    cooldown_candles=settings.cooldown_candles,
+)
 risk_manager = RiskManager(
     RiskConfig(
         risk_per_trade_pct=settings.risk_per_trade_pct,
         daily_loss_limit_pct=settings.daily_loss_limit_pct,
+        daily_profit_target=settings.daily_profit_target,
         max_trades_per_day=settings.max_trades_per_day,
         max_leverage=settings.max_leverage,
     )
@@ -46,6 +61,7 @@ journal = JournalService()
 screenshots = ScreenshotService()
 backtest_service = BacktestService()
 telegram = TelegramService()
+llm = LLMDecisionService()
 
 runtime_state: dict[str, Any] = {
     "equity": settings.default_equity,
@@ -174,8 +190,17 @@ async def process_candle(candle: dict[str, Any]) -> None:
     if symbol in runtime_state["open_trades"]:
         return
 
+    # Use live balance when available
+    trade_equity = float(runtime_state["equity"])
+    try:
+        account = await exchange.get_balance()
+        if str(account.get("mode", "paper")) == "live":
+            trade_equity = float(account.get("equity", trade_equity))
+    except Exception:
+        pass
+
     decision = risk_manager.evaluate_entry(
-        equity=float(runtime_state["equity"]),
+        equity=trade_equity,
         day_stats=runtime_state["day_stats"],
         entry_price=signal.entry,
         stop_price=signal.stop_loss,
@@ -214,6 +239,19 @@ async def process_candle(candle: dict[str, Any]) -> None:
         )
         await telegram.send(f"⚠️ Live trade blocked {symbol}: LIVE_TRADING_ENABLED is false")
         return
+
+    # LLM news sentiment check before entry
+    if llm.is_enabled() and settings.llm_news_check_enabled:
+        news = await llm.check_news_sentiment(symbol)
+        sentiment = news.get("sentiment", "neutral")
+        if signal.side == "buy" and sentiment == "bearish":
+            journal.log_event("llm_blocked_entry", {"symbol": symbol, "side": "buy", "news": news}, level="WARN", symbol=symbol, strategy=signal.strategy)
+            await telegram.send(f"🤖 LLM blocked BUY {symbol}: bearish news sentiment")
+            return
+        if signal.side == "sell" and sentiment == "bullish":
+            journal.log_event("llm_blocked_entry", {"symbol": symbol, "side": "sell", "news": news}, level="WARN", symbol=symbol, strategy=signal.strategy)
+            await telegram.send(f"🤖 LLM blocked SELL {symbol}: bullish news sentiment")
+            return
 
     await orders.place(
         {
@@ -304,15 +342,36 @@ async def _check_open_trade_exit(symbol: str, candle: dict[str, Any]) -> None:
     side = open_trade["side"].lower()
     high = float(candle["high"])
     low = float(candle["low"])
+    close = float(candle["close"])
+
+    # Sync SL from strategy state (breakeven move after TP1)
+    strat_state = strategy_engine.ema_scalp.states.get(symbol)
+    if strat_state and strat_state.in_trade:
+        open_trade["stop_loss"] = strat_state.stop_loss
+        open_trade["take_profit"] = strat_state.take_profit
 
     hit_sl = low <= open_trade["stop_loss"] if side == "buy" else high >= open_trade["stop_loss"]
     hit_tp = high >= open_trade["take_profit"] if side == "buy" else low <= open_trade["take_profit"]
 
-    if not hit_sl and not hit_tp:
+    # Check trailed-out exit (EMA21 cross after TP1)
+    trailed_out = False
+    if strat_state and not strat_state.in_trade and strat_state.last_status in (
+        "long_trailed_out", "short_trailed_out", "long_tp2_hit", "short_tp2_hit",
+    ):
+        trailed_out = True
+
+    if not hit_sl and not hit_tp and not trailed_out:
         return
 
-    exit_price = open_trade["stop_loss"] if hit_sl else open_trade["take_profit"]
-    reason = "sl_hit" if hit_sl else "tp_hit"
+    if trailed_out:
+        exit_price = close
+        reason = "trailed_out"
+    elif hit_sl:
+        exit_price = open_trade["stop_loss"]
+        reason = "sl_hit"
+    else:
+        exit_price = open_trade["take_profit"]
+        reason = "tp_hit"
     sign = 1 if side == "buy" else -1
     pnl = sign * (exit_price - open_trade["entry"]) * open_trade.get("risk_amount", 1.0)
     pnl_r = risk_manager.compute_r_multiple(
@@ -349,10 +408,13 @@ async def _check_open_trade_exit(symbol: str, candle: dict[str, Any]) -> None:
         session.add(trade)
 
     runtime_state["equity"] = float(runtime_state["equity"]) + pnl
+    day_key = datetime.now(UTC).strftime("%Y-%m-%d")
     if pnl < 0:
-        day_key = datetime.now(UTC).strftime("%Y-%m-%d")
         day_loss = float(runtime_state["day_stats"]["loss"].get(day_key, 0.0))
         runtime_state["day_stats"]["loss"][day_key] = round(day_loss + abs(pnl), 2)
+    else:
+        day_profit = float(runtime_state["day_stats"].get("profit", {}).get(day_key, 0.0))
+        runtime_state["day_stats"].setdefault("profit", {})[day_key] = round(day_profit + pnl, 2)
 
     runtime_state["open_trades"].pop(symbol, None)
 
@@ -367,7 +429,7 @@ async def _check_open_trade_exit(symbol: str, candle: dict[str, Any]) -> None:
             "pnl_r": round(pnl_r, 3),
         },
         symbol=symbol,
-        strategy="range_reentry_4h",
+        strategy="ema_scalp_9_21_200",
     )
     await telegram.send(
         telegram.format_close(
@@ -558,6 +620,76 @@ async def dashboard_calendar(days: int = 60) -> list[dict]:
     return analytics.daily_calendar(days=days)
 
 
+@app.get("/dashboard/symbol-stats")
+async def dashboard_symbol_stats() -> list[dict]:
+    with db_session() as session:
+        all_trades = session.execute(select(Trade)).scalars().all()
+
+    from collections import defaultdict
+    by_symbol: dict[str, list] = defaultdict(list)
+    for t in all_trades:
+        by_symbol[t.symbol].append(t)
+
+    result = []
+    for symbol, trades in sorted(by_symbol.items()):
+        closed = [t for t in trades if t.status == "CLOSED"]
+        open_t = [t for t in trades if t.status == "OPEN"]
+        wins = [float(t.pnl or 0) for t in closed if float(t.pnl or 0) > 0]
+        losses = [float(t.pnl or 0) for t in closed if float(t.pnl or 0) <= 0]
+        total_pnl = sum(float(t.pnl or 0) for t in closed)
+        result.append({
+            "symbol": symbol,
+            "status": runtime_state["status_by_symbol"].get(symbol, {}).get("last_status", "idle"),
+            "total_trades": len(trades),
+            "open_trades": len(open_t),
+            "closed_trades": len(closed),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": round(len(wins) / max(len(closed), 1) * 100, 2),
+            "total_pnl": round(total_pnl, 2),
+            "total_profit": round(sum(wins), 2),
+            "total_loss": round(sum(losses), 2),
+            "avg_pnl": round(total_pnl / max(len(closed), 1), 2),
+            "lots_traded": round(sum(float(t.quantity or 0) for t in trades), 4),
+        })
+    return result
+
+
+@app.get("/llm/status")
+async def llm_status() -> dict:
+    return {
+        "enabled": llm.is_enabled(),
+        "news_check": settings.llm_news_check_enabled,
+        "provider": settings.llm_provider,
+        "model": settings.llm_model,
+    }
+
+
+@app.get("/llm/news/{symbol}")
+async def llm_news_check(symbol: str) -> dict:
+    return await llm.check_news_sentiment(symbol.upper())
+
+
+@app.post("/llm/evaluate-exit/{trade_id}")
+async def llm_evaluate_exit(trade_id: int) -> dict:
+    with db_session() as session:
+        trade = session.get(Trade, trade_id)
+        if trade is None:
+            raise HTTPException(status_code=404, detail=f"Trade {trade_id} not found")
+        trade_dict = {
+            "symbol": trade.symbol,
+            "side": trade.side,
+            "entry": trade.entry_price,
+            "sl": trade.stop_loss,
+            "tp": trade.take_profit,
+            "status": trade.status,
+        }
+    candle = candles.get_latest(trade_dict["symbol"])
+    current_price = float(candle["close"]) if candle else trade_dict["entry"]
+    history = candles.get_history(trade_dict["symbol"], 20)
+    return await llm.evaluate_exit(trade_dict, current_price, history)
+
+
 @app.get("/journal/events")
 async def journal_events(limit: int = 300) -> list[dict]:
     return analytics.event_timeline(limit=limit)
@@ -623,6 +755,15 @@ async def dashboard_socket(ws: WebSocket) -> None:
                 "overview": await dashboard_overview(),
                 "equity": analytics.equity_curve(limit=80),
                 "open_positions": await open_positions(),
+                "trades": analytics.trade_history(limit=20),
+                "symbol_stats": await dashboard_symbol_stats(),
+                "day_stats": {
+                    "trades": runtime_state["day_stats"].get("trades", {}),
+                    "loss": runtime_state["day_stats"].get("loss", {}),
+                    "profit": runtime_state["day_stats"].get("profit", {}),
+                    "profit_target": settings.daily_profit_target,
+                    "loss_limit_pct": settings.daily_loss_limit_pct,
+                },
             }
             await ws.send_json(snapshot)
             await asyncio.sleep(1)
