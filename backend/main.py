@@ -56,6 +56,65 @@ runtime_state: dict[str, Any] = {
 }
 
 
+def _normalize_symbol(symbol: str) -> str:
+    return symbol.upper().replace("USDT", "USD")
+
+
+async def _combined_open_positions() -> list[dict[str, Any]]:
+    with db_session() as session:
+        db_rows = session.execute(select(Trade).where(Trade.status == "OPEN")).scalars().all()
+
+    combined: list[dict[str, Any]] = [
+        {
+            "id": t.id,
+            "symbol": t.symbol,
+            "strategy": t.strategy,
+            "side": t.side,
+            "entry": t.entry_price,
+            "sl": t.stop_loss,
+            "tp": t.take_profit,
+            "quantity": t.quantity,
+            "opened_at": t.opened_at.isoformat(),
+            "source": "db",
+        }
+        for t in db_rows
+    ]
+
+    db_symbols = {_normalize_symbol(str(item["symbol"])) for item in combined}
+
+    try:
+        live_positions = await exchange.get_open_positions()
+    except PermissionError:
+        return combined
+    except Exception:
+        return combined
+
+    synthetic_id = -1
+    for position in live_positions:
+        symbol = str(position.get("symbol", ""))
+        normalized = _normalize_symbol(symbol)
+        if normalized in db_symbols:
+            continue
+
+        combined.append(
+            {
+                "id": synthetic_id,
+                "symbol": symbol,
+                "strategy": "live_exchange",
+                "side": str(position.get("side", "")),
+                "entry": float(position.get("entry_price", 0.0) or 0.0),
+                "sl": 0.0,
+                "tp": 0.0,
+                "quantity": float(position.get("quantity", 0.0) or 0.0),
+                "opened_at": datetime.utcnow().isoformat(),
+                "source": "exchange",
+            }
+        )
+        synthetic_id -= 1
+
+    return combined
+
+
 class LoginRequest(BaseModel):
     api_key: str = ""
     api_secret: str = ""
@@ -377,22 +436,7 @@ async def account_balance() -> dict:
 
 @app.get("/positions/open")
 async def open_positions() -> list[dict]:
-    with db_session() as session:
-        rows = session.execute(select(Trade).where(Trade.status == "OPEN")).scalars().all()
-    return [
-        {
-            "id": t.id,
-            "symbol": t.symbol,
-            "strategy": t.strategy,
-            "side": t.side,
-            "entry": t.entry_price,
-            "sl": t.stop_loss,
-            "tp": t.take_profit,
-            "quantity": t.quantity,
-            "opened_at": t.opened_at.isoformat(),
-        }
-        for t in rows
-    ]
+    return await _combined_open_positions()
 
 
 @app.post("/orders")
@@ -470,6 +514,18 @@ async def dashboard_overview() -> dict:
     metrics["balance"] = live_equity
     metrics["sim_equity"] = sim_equity
     metrics["account_mode"] = account_mode
+    metrics["open_positions"] = [
+        {
+            "id": item["id"],
+            "symbol": item["symbol"],
+            "side": item["side"],
+            "entry": item["entry"],
+            "sl": item["sl"],
+            "tp": item["tp"],
+            "strategy": item["strategy"],
+        }
+        for item in await _combined_open_positions()
+    ]
     metrics["symbols"] = [
         {"symbol": symbol, "status": data.get("last_status", "idle")}
         for symbol, data in runtime_state["status_by_symbol"].items()
