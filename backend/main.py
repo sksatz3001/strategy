@@ -381,6 +381,8 @@ async def _check_open_trade_exit(symbol: str, candle: dict[str, Any]) -> None:
     if not hit_sl and not hit_tp and not trailed_out:
         return
 
+    trade_id = int(open_trade["trade_id"])
+
     if trailed_out:
         exit_price = close
         reason = "trailed_out"
@@ -401,18 +403,29 @@ async def _check_open_trade_exit(symbol: str, candle: dict[str, Any]) -> None:
 
     # Send actual close order to exchange
     close_side = "sell" if side == "buy" else "buy"
-    quantity = float(open_trade.get("quantity", 0))
-    try:
-        await orders.place({
-            "symbol": symbol,
-            "side": close_side,
-            "quantity": quantity,
-            "order_type": "market",
-            "price": exit_price,
-        })
-        logger.info("Close order sent: %s %s qty=%s", symbol, close_side, quantity)
-    except Exception as exc:
-        logger.error("Close order failed for %s: %s", symbol, exc)
+    quantity = float(open_trade.get("quantity", 0)) or 0.0
+
+    # If quantity not in runtime state, get from trade DB
+    if quantity <= 0:
+        with db_session() as s:
+            db_trade = s.get(Trade, trade_id)
+            if db_trade:
+                quantity = float(db_trade.quantity or 0)
+
+    if quantity > 0:
+        try:
+            await orders.place({
+                "symbol": symbol,
+                "side": close_side,
+                "quantity": quantity,
+                "order_type": "market",
+                "price": exit_price,
+            })
+            logger.info("Close order sent: %s %s qty=%s", symbol, close_side, quantity)
+        except Exception as exc:
+            logger.error("Close order failed for %s: %s", symbol, exc)
+    else:
+        logger.warning("No quantity available for closing %s", symbol)
 
     trade_id = int(open_trade["trade_id"])
     with db_session() as session:
@@ -514,6 +527,34 @@ app.add_middleware(
 )
 
 
+@app.get("/positions/close-all-exchange")
+async def close_all_exchange_positions() -> dict:
+    """Close all positions on Delta Exchange that DB thinks are closed but exchange still has open."""
+    closed_symbols = []
+    try:
+        live_positions = await exchange.get_open_positions()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    for pos in live_positions:
+        symbol = str(pos.get("symbol", ""))
+        side = str(pos.get("side", ""))
+        quantity = float(pos.get("quantity", 0))
+        close_side = "sell" if side == "buy" else "buy"
+        try:
+            await orders.place({
+                "symbol": symbol,
+                "side": close_side,
+                "quantity": quantity,
+                "order_type": "market",
+            })
+            closed_symbols.append(symbol)
+        except Exception as exc:
+            logger.error("Failed to close %s: %s", symbol, exc)
+
+    return {"closed": closed_symbols, "count": len(closed_symbols)}
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "env": settings.app_env}
@@ -540,6 +581,45 @@ async def account_balance() -> dict:
 @app.get("/positions/open")
 async def open_positions() -> list[dict]:
     return await _combined_open_positions()
+
+
+@app.post("/positions/close/{symbol}")
+async def close_position(symbol: str) -> dict:
+    symbol = symbol.upper()
+    try:
+        positions = await exchange.get_open_positions()
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    normalized = symbol.replace("USDT", "USD")
+    target = None
+    for pos in positions:
+        pos_symbol = str(pos.get("symbol", "")).upper().replace("USDT", "USD")
+        if pos_symbol == normalized:
+            target = pos
+            break
+
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"No open position found for {symbol}")
+
+    side = str(target.get("side", "buy")).lower()
+    close_side = "sell" if side == "buy" else "buy"
+    quantity = float(target.get("quantity", 0))
+
+    if quantity <= 0:
+        raise HTTPException(status_code=400, detail=f"Invalid quantity for {symbol}: {quantity}")
+
+    try:
+        result = await orders.place({
+            "symbol": symbol,
+            "side": close_side,
+            "quantity": quantity,
+            "order_type": "market",
+        })
+        journal.log_event("manual_close", {"symbol": symbol, "side": close_side, "quantity": quantity, "result": result}, symbol=symbol)
+        return {"status": "close_order_sent", "symbol": symbol, "side": close_side, "quantity": quantity}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Close order failed: {exc}")
 
 
 @app.post("/orders")
