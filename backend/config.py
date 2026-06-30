@@ -19,10 +19,10 @@ class Settings(BaseSettings):
     default_leverage: int = 3
 
     risk_per_trade_pct: float = 5.0
-    daily_loss_limit_pct: float = 3.0
+    daily_loss_limit_pct: float = 50.0
     daily_profit_target: float = 20.0
     max_trades_per_day: int = 25
-    max_leverage: int = 5
+    max_leverage: int = 10
 
     default_rr: float = 2.0
     reentry_buffer_pct: float = 0.10
