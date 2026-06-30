@@ -60,10 +60,27 @@ class RiskManager:
             return RiskDecision(False, "Invalid risk distance (entry equals stop)")
 
         risk_amount = equity * (self.config.risk_per_trade_pct / 100.0)
-        quantity = risk_amount / per_unit_risk
-        notional = quantity * entry_price
-        margin_required = notional / max(leverage, 1)
 
+        # Use max leverage for margin efficiency
+        effective_leverage = max(self.config.max_leverage, leverage, 1)
+
+        # Calculate quantity based on risk amount and stop distance
+        quantity_by_risk = risk_amount / per_unit_risk
+
+        # Calculate max quantity allowed by available margin
+        max_notional = equity * effective_leverage
+        max_quantity_by_margin = max_notional / entry_price if entry_price > 0 else 0
+
+        # Use the smaller of the two to stay within both risk and margin limits
+        quantity = min(quantity_by_risk, max_quantity_by_margin)
+
+        if quantity <= 0:
+            return RiskDecision(False, "Quantity too small for entry")
+
+        notional = quantity * entry_price
+        margin_required = notional / effective_leverage
+
+        # Only block if margin exceeds total equity (not risk amount)
         if margin_required > equity:
             return RiskDecision(False, "Insufficient equity for required margin")
 
